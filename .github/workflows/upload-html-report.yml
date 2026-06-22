@@ -1,10 +1,6 @@
 name: Upload HTML site report
 
 on:
-  push:
-    branches:
-      - gh-pages
-      - master
   workflow_dispatch:
 
 jobs:
@@ -17,9 +13,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Upload HTML site as report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
-          name: html-site-report
           path: |
             github-pages/**/*.html
-          if-no-files-found: error
+  
+      - name: Deploy HTML site report
+        uses: actions/deploy-pages@v5
