@@ -1,4 +1,4 @@
-# Simple workflow for deploying static content to GitHub Pages
+# Simple workflow for building the Java app and deploying static content to GitHub Pages
 name: Deploy static content to Pages
 
 on:
@@ -24,6 +24,32 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build and test
+        run: mvn --batch-mode test
+
+      - name: Copy JUnit reports into site
+        run: |
+          mkdir -p github-pages/surefire-reports
+          cp target/surefire-reports/*.xml github-pages/surefire-reports/
+          {
+            echo '<!doctype html>'
+            echo '<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+            echo '<title>JUnit Surefire Reports</title></head><body>'
+            echo '<h1>JUnit Surefire Reports</h1><ul>'
+            for file in github-pages/surefire-reports/*.xml; do
+              name="$(basename "$file")"
+              echo "<li><a href=\"./$name\">$name</a></li>"
+            done
+            echo '</ul><p><a href="../">Back to site</a></p></body></html>'
+          } > github-pages/surefire-reports/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
