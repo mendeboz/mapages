@@ -21,6 +21,5 @@ jobs:
         with:
           name: html-site-report
           path: |
-            index.html
             github-pages/**/*.html
           if-no-files-found: error
