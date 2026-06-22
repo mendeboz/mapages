@@ -36,6 +36,9 @@ jobs:
       - name: Build and test
         run: mvn --batch-mode test
 
+      - name: Prepare JaCoCo reporter output directory
+        run: mkdir -p _TMP
+
       - name: Publish JaCoCo summary
         uses: PavanMudigonda/jacoco-reporter@v5.2
         with:
