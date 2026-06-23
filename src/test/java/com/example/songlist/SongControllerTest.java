@@ -23,6 +23,16 @@ class SongControllerTest {
         mockMvc.perform(get("/"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(containsString("Daily Song List")))
-                .andExpect(content().string(containsString("<ol>")));
+                .andExpect(content().string(containsString("<ol>")))
+                .andExpect(content().string(containsString("<select id=\"genre\" name=\"genre\">")));
+    }
+
+    @Test
+    void showsTheSelectedGenre() throws Exception {
+        mockMvc.perform(get("/").param("genre", "Pop"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(containsString("Ten songs selected for")))
+                .andExpect(content().string(containsString(" in Pop.")))
+                .andExpect(content().string(containsString("<option value=\"Pop\" selected>Pop</option>")));
     }
 }

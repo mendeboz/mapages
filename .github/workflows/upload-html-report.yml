@@ -32,6 +32,9 @@ jobs:
       - name: Build and test
         run: mvn --batch-mode test
 
+      - name: Generate Surefire HTML report
+        run: mvn --batch-mode org.apache.maven.plugins:maven-surefire-report-plugin:3.5.2:report-only
+
       - name: Prepare JaCoCo reporter output directory
         run: mkdir -p _TMP
 
@@ -46,21 +49,12 @@ jobs:
 
       - name: Copy test reports into site
         run: |
-          mkdir -p github-pages/surefire-reports github-pages/jacoco github-pages/cucumber
-          cp target/surefire-reports/*.xml github-pages/surefire-reports/
+          mkdir -p github-pages/surefire-reports/xml github-pages/jacoco github-pages/cucumber
+          cp -r target/reports/. github-pages/surefire-reports/
+          cp target/reports/surefire.html github-pages/surefire-reports/index.html
+          cp target/surefire-reports/*.xml github-pages/surefire-reports/xml/
           cp -r target/site/jacoco/. github-pages/jacoco/
           cp -r target/cucumber-reports/. github-pages/cucumber/
-          {
-            echo '<!doctype html>'
-            echo '<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-            echo '<title>JUnit Surefire Reports</title></head><body>'
-            echo '<h1>JUnit Surefire Reports</h1><ul>'
-            for file in github-pages/surefire-reports/*.xml; do
-              name="$(basename "$file")"
-              echo "<li><a href=\"./$name\">$name</a></li>"
-            done
-            echo '</ul><p><a href="../">Back to site</a></p></body></html>'
-          } > github-pages/surefire-reports/index.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -73,3 +67,4 @@ jobs:
       - name: Deploy HTML site report
         id: deployment
         uses: actions/deploy-pages@v5
+

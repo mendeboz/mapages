@@ -1,4 +1,4 @@
 package com.example.songlist;
 
-public record Song(String title, String artist) {
+public record Song(String title, String artist, String genre) {
 }

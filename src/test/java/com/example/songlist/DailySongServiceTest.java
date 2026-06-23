@@ -3,6 +3,7 @@ package com.example.songlist;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.LocalDate;
+import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 
@@ -20,5 +21,17 @@ class DailySongServiceTest {
         LocalDate date = LocalDate.of(2026, 6, 22);
 
         assertThat(service.songsFor(date)).isEqualTo(service.songsFor(date));
+    }
+
+    @Test
+    void returnsSongsForTheSelectedGenre() {
+        assertThat(service.songsFor(LocalDate.of(2026, 6, 22), Optional.of("Pop")))
+                .isNotEmpty()
+                .allMatch(song -> song.genre().equals("Pop"));
+    }
+
+    @Test
+    void listsAvailableGenres() {
+        assertThat(service.genres()).contains("Pop", "Rock", "Soul");
     }
 }
