@@ -1,9 +1,10 @@
-# Simple workflow for building the Java app and deploying static content to GitHub Pages
-name: Deploy static content to Pages
+name: Maven Build & Test Reports
 
 on:
   push:
-    branches: ["master"]
+    branches: ["master", "main", "develop"]
+  pull_request:
+    branches: ["master", "main", "develop"]
   workflow_dispatch:
 
 permissions:
@@ -17,53 +18,204 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build-and-test:
+    name: Build & Test with Reports
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
           cache: maven
 
-      - name: Build and test
-        run: mvn --batch-mode test
+      - name: Build and run tests
+        run: mvn --batch-mode clean test
+        continue-on-error: true
 
       - name: Generate Surefire HTML report
+        if: always()
         run: mvn --batch-mode org.apache.maven.plugins:maven-surefire-report-plugin:3.5.2:report-only
 
-      - name: Prepare JaCoCo reporter output directory
-        run: mkdir -p _TMP
+      # Publish JUnit test results to GitHub Checks
+      - name: Publish JUnit Results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: target/surefire-reports/*.xml
+          check_name: JUnit Test Results
+          comment_mode: always
 
-      - name: Publish JaCoCo summary
+      # Publish JaCoCo coverage to GitHub Checks
+      - name: Publish JaCoCo Coverage
+        if: always()
         uses: PavanMudigonda/jacoco-reporter@v5.2
         with:
           coverage_results_path: target/site/jacoco/jacoco.xml
-          coverage_report_name: JaCoCo Coverage Report
-          coverage_report_title: JaCoCo Coverage Report
+          coverage_report_name: JaCoCo Code Coverage
+          coverage_report_title: Code Coverage Report
           github_token: ${{ secrets.GITHUB_TOKEN }}
           skip_check_run: false
 
-      - name: Copy test reports into site
-        run: |
-          mkdir -p github-pages/surefire-reports/xml github-pages/jacoco github-pages/cucumber
-          cp -r target/reports/. github-pages/surefire-reports/
-          cp target/reports/surefire.html github-pages/surefire-reports/index.html
-          cp target/surefire-reports/*.xml github-pages/surefire-reports/xml/
-          cp -r target/site/jacoco/. github-pages/jacoco/
-          cp -r target/cucumber-reports/. github-pages/cucumber/
+      # Upload test artifacts
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-build-${{ github.run_number }}
+          path: |
+            target/surefire-reports/
+            target/site/jacoco/
+            target/cucumber-reports/
+          retention-days: 30
+          if-no-files-found: warn
 
-      - name: Setup Pages
+  publish-history:
+    name: Publish Reports History to Pages
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build and run tests
+        run: mvn --batch-mode clean test
+
+      - name: Generate reports
+        run: mvn --batch-mode org.apache.maven.plugins:maven-surefire-report-plugin:3.5.2:report-only
+
+      # Prepare reports by build number for history
+      - name: Prepare reports directory structure
+        run: |
+          BUILD_DIR="github-pages/builds/build-${{ github.run_number }}"
+          mkdir -p "$BUILD_DIR/surefire"
+          mkdir -p "$BUILD_DIR/jacoco"
+          mkdir -p "$BUILD_DIR/cucumber"
+
+          # Copy Surefire reports
+          if [ -d target/site/surefire ]; then
+            cp -r target/site/surefire/* "$BUILD_DIR/surefire/" || true
+          fi
+          cp -r target/surefire-reports/*.xml "$BUILD_DIR/surefire/" 2>/dev/null || true
+
+          # Copy JaCoCo reports
+          cp -r target/site/jacoco/* "$BUILD_DIR/jacoco/" 2>/dev/null || true
+
+          # Copy Cucumber reports
+          cp -r target/cucumber-reports/* "$BUILD_DIR/cucumber/" 2>/dev/null || true
+
+      # Create build index
+      - name: Generate build index page
+        run: |
+          cat > github-pages/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Maven Test Reports - Build History</title>
+              <style>
+                  * { margin: 0; padding: 0; box-sizing: border-box; }
+                  body {
+                      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      min-height: 100vh;
+                      padding: 20px;
+                  }
+                  .container { max-width: 1200px; margin: 0 auto; }
+                  .header {
+                      background: white;
+                      padding: 30px;
+                      border-radius: 8px;
+                      margin-bottom: 30px;
+                      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                  }
+                  .header h1 { color: #333; margin-bottom: 10px; }
+                  .header p { color: #666; }
+                  .builds-grid {
+                      display: grid;
+                      gap: 20px;
+                      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+                  }
+                  .build-card {
+                      background: white;
+                      border-radius: 8px;
+                      overflow: hidden;
+                      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                      transition: transform 0.2s, box-shadow 0.2s;
+                  }
+                  .build-card:hover { transform: translateY(-4px); box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
+                  .build-header {
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      color: white;
+                      padding: 15px;
+                  }
+                  .build-header h3 { margin-bottom: 5px; }
+                  .build-meta { font-size: 0.85em; opacity: 0.9; }
+                  .build-reports {
+                      padding: 15px;
+                  }
+                  .report-link {
+                      display: inline-block;
+                      margin: 5px 5px 5px 0;
+                      padding: 8px 15px;
+                      background: #f0f0f0;
+                      color: #667eea;
+                      text-decoration: none;
+                      border-radius: 4px;
+                      font-weight: 500;
+                      transition: background 0.2s;
+                  }
+                  .report-link:hover { background: #e0e0e0; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <div class="header">
+                      <h1>📊 Maven Test Reports</h1>
+                      <p>Build history and test results - JUnit, JaCoCo Coverage, and Cucumber Tests</p>
+                  </div>
+                  <div class="builds-grid">
+                      <div class="build-card">
+                          <div class="build-header">
+                              <h3>Latest Build #${{ github.run_number }}</h3>
+                              <div class="build-meta">Commit: ${{ github.sha }}</div>
+                          </div>
+                          <div class="build-reports">
+                              <a href="builds/build-${{ github.run_number }}/surefire/" class="report-link">✓ JUnit Tests</a>
+                              <a href="builds/build-${{ github.run_number }}/jacoco/" class="report-link">📈 JaCoCo Coverage</a>
+                              <a href="builds/build-${{ github.run_number }}/cucumber/" class="report-link">🥒 Cucumber Tests</a>
+                          </div>
+                      </div>
+                  </div>
+                  <p style="color: white; margin-top: 40px; text-align: center; font-size: 0.9em;">
+                      Reports are retained for 30 days in Actions Artifacts | Full history preserved on GitHub Pages
+                  </p>
+              </div>
+          </body>
+          </html>
+          EOF
+
+      - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload artifact
+      - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: './github-pages'

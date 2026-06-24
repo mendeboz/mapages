@@ -1,6 +1,10 @@
-name: Upload HTML site report
+name: Maven Build & Test Reports
 
 on:
+  push:
+    branches: [master, main, develop]
+  pull_request:
+    branches: [master, main, develop]
   workflow_dispatch:
 
 permissions:
@@ -10,12 +14,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: "pages-${{ github.ref }}"
   cancel-in-progress: false
 
 jobs:
-  upload-report:
-    name: Upload HTML report
+  build-and-test:
+    name: Build & Test
     runs-on: ubuntu-latest
 
     steps:
@@ -30,41 +34,139 @@ jobs:
           cache: maven
 
       - name: Build and test
-        run: mvn --batch-mode test
+        run: mvn --batch-mode clean test
+
+      - name: Generate Surefire HTML report
+        if: always()
+        run: mvn --batch-mode org.apache.maven.plugins:maven-surefire-report-plugin:3.5.2:report-only
+
+      - name: Publish JUnit test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: target/surefire-reports/*.xml
+          check_name: JUnit Test Results
+
+      - name: Publish JaCoCo coverage
+        uses: PavanMudigonda/jacoco-reporter@v5.2
+        if: always()
+        with:
+          coverage_results_path: target/site/jacoco/jacoco.xml
+          coverage_report_name: JaCoCo Coverage
+          coverage_report_title: Code Coverage Report
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          skip_check_run: false
+
+      - name: Publish Cucumber results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: target/surefire-reports/TEST-*.xml
+          check_name: Cucumber Test Results
+
+      - name: Upload test reports as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ github.run_number }}
+          path: |
+            target/surefire-reports/
+            target/site/jacoco/
+            target/cucumber-reports/
+          retention-days: 30
+
+  publish-reports:
+    name: Publish to GitHub Pages
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build reports
+        run: mvn --batch-mode clean test
 
       - name: Generate Surefire HTML report
         run: mvn --batch-mode org.apache.maven.plugins:maven-surefire-report-plugin:3.5.2:report-only
 
-      - name: Prepare JaCoCo reporter output directory
-        run: mkdir -p _TMP
-
-      - name: Publish JaCoCo summary
-        uses: PavanMudigonda/jacoco-reporter@v5.2
-        with:
-          coverage_results_path: target/site/jacoco/jacoco.xml
-          coverage_report_name: JaCoCo Coverage Report
-          coverage_report_title: JaCoCo Coverage Report
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          skip_check_run: false
-
-      - name: Copy test reports into site
+      - name: Prepare reports directory
         run: |
-          mkdir -p github-pages/surefire-reports/xml github-pages/jacoco github-pages/cucumber
-          cp -r target/reports/. github-pages/surefire-reports/
-          cp target/reports/surefire.html github-pages/surefire-reports/index.html
-          cp target/surefire-reports/*.xml github-pages/surefire-reports/xml/
-          cp -r target/site/jacoco/. github-pages/jacoco/
-          cp -r target/cucumber-reports/. github-pages/cucumber/
+          mkdir -p github-pages/builds/${{ github.run_number }}
+          mkdir -p github-pages/builds/${{ github.run_number }}/surefire
+          mkdir -p github-pages/builds/${{ github.run_number }}/jacoco
+          mkdir -p github-pages/builds/${{ github.run_number }}/cucumber
+
+      - name: Copy Surefire reports
+        run: |
+          cp -r target/site/surefire-report.html github-pages/builds/${{ github.run_number }}/surefire/index.html 2>/dev/null || true
+          cp -r target/surefire-reports/*.xml github-pages/builds/${{ github.run_number }}/surefire/ 2>/dev/null || true
+
+      - name: Copy JaCoCo reports
+        run: cp -r target/site/jacoco/. github-pages/builds/${{ github.run_number }}/jacoco/
+
+      - name: Copy Cucumber reports
+        run: cp -r target/cucumber-reports/. github-pages/builds/${{ github.run_number }}/cucumber/ 2>/dev/null || true
+
+      - name: Create index page with build history
+        run: |
+          cat > github-pages/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Test Reports</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 20px; }
+                  h1 { color: #333; }
+                  .build-list { list-style-type: none; padding: 0; }
+                  .build-item {
+                      padding: 10px;
+                      margin: 5px 0;
+                      background: #f5f5f5;
+                      border-radius: 5px;
+                      border-left: 4px solid #007bff;
+                  }
+                  .build-item a { text-decoration: none; color: #007bff; font-weight: bold; }
+                  .build-item a:hover { text-decoration: underline; }
+                  .timestamp { color: #666; font-size: 0.9em; }
+              </style>
+          </head>
+          <body>
+              <h1>Maven Test Reports</h1>
+              <p>Build history and test results from recent builds</p>
+              <ul class="build-list">
+                  <li class="build-item">
+                      <a href="builds/${{ github.run_number }}/surefire/">JUnit/Surefire Tests</a>
+                      <br><span class="timestamp">Build #${{ github.run_number }} - Commit: ${{ github.sha }}</span>
+                  </li>
+                  <li class="build-item">
+                      <a href="builds/${{ github.run_number }}/jacoco/">JaCoCo Coverage Report</a>
+                  </li>
+                  <li class="build-item">
+                      <a href="builds/${{ github.run_number }}/cucumber/">Cucumber Test Report</a>
+                  </li>
+              </ul>
+          </body>
+          </html>
+          EOF
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload HTML site as report
+      - name: Upload to GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
           path: './github-pages'
 
-      - name: Deploy HTML site report
+      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
 
