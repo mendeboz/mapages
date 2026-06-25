@@ -6,6 +6,22 @@ on:
   pull_request:
     branches: [master, main, develop]
   workflow_dispatch:
+    inputs:
+      service:
+        description: Service directory path relative to repository root
+        required: false
+        default: '.'
+      publish_reports:
+        description: Publish generated reports and deploy to gh-pages
+        required: false
+        default: 'false'
+      from_branch:
+        description: Optional branch name to use in report paths
+        required: false
+      report_root:
+        description: Local report root directory
+        required: false
+        default: 'reports'
 
 permissions:
   contents: read
@@ -36,137 +52,222 @@ jobs:
       - name: Build and test
         run: mvn --batch-mode clean test
 
-      - name: Generate Surefire HTML report
-        if: always()
-        run: mvn --batch-mode org.apache.maven.plugins:maven-surefire-report-plugin:3.5.2:report-only
-
-      - name: Publish JUnit test results
-        uses: EnricoMi/publish-unit-test-result-action@v2
-        if: always()
-        with:
-          files: target/surefire-reports/*.xml
-          check_name: JUnit Test Results
-
-      - name: Publish JaCoCo coverage
-        uses: PavanMudigonda/jacoco-reporter@v5.2
-        if: always()
-        with:
-          coverage_results_path: target/site/jacoco/jacoco.xml
-          coverage_report_name: JaCoCo Coverage
-          coverage_report_title: Code Coverage Report
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          skip_check_run: false
-
-      - name: Publish Cucumber results
-        uses: EnricoMi/publish-unit-test-result-action@v2
-        if: always()
-        with:
-          files: target/surefire-reports/TEST-*.xml
-          check_name: Cucumber Test Results
-
-      - name: Upload test reports as artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-reports-${{ github.run_number }}
-          path: |
-            target/surefire-reports/
-            target/site/jacoco/
-            target/cucumber-reports/
-          retention-days: 30
-
-  publish-reports:
-    name: Publish to GitHub Pages
-    needs: build-and-test
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-          cache: maven
-
-      - name: Build reports
-        run: mvn --batch-mode clean test
-
-      - name: Generate Surefire HTML report
-        run: mvn --batch-mode org.apache.maven.plugins:maven-surefire-report-plugin:3.5.2:report-only
-
-      - name: Prepare reports directory
+      - name: Prepare report folders
+        id: prepare-reports  
+        if: ${{ inputs.publish_reports == 'true' }}
+        shell: bash
         run: |
-          mkdir -p github-pages/builds/${{ github.run_number }}
-          mkdir -p github-pages/builds/${{ github.run_number }}/surefire
-          mkdir -p github-pages/builds/${{ github.run_number }}/jacoco
-          mkdir -p github-pages/builds/${{ github.run_number }}/cucumber
+          SAFE_BRANCH="$(echo "${FROM_BRANCH:-unknown}" | sed 's#[^a-zA-Z0-9._-]#-#g')"
+          echo "SAFE_BRANCH=${SAFE_BRANCH}" >> "$GITHUB_ENV"
 
-      - name: Copy Surefire reports
+          REPORT_PATH="${REPORT_ROOT}/${SAFE_BRANCH}/${GITHUB_RUN_NUMBER}"
+          LATEST_PATH="${REPORT_ROOT}/${SAFE_BRANCH}/latest"
+
+          echo "REPORT_PATH=${REPORT_PATH}" >> "$GITHUB_ENV"
+          echo "LATEST_PATH=${LATEST_PATH}" >> "$GITHUB_ENV"
+
+          echo "SAFE_BRANCH=${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "REPORT_PATH=${REPORT_PATH}" >> "$GITHUB_OUTPUT"
+          echo "LATEST_PATH=${LATEST_PATH}" >> "$GITHUB_OUTPUT"
+
+          mkdir -p "${REPORT_PATH}"
+          mkdir -p "${LATEST_PATH}"
+        env:
+          FROM_BRANCH: ${{ inputs.from_branch || github.ref_name || github.event.pull_request.base.ref }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          REPORT_ROOT: ${{ github.workspace }}/${{ inputs.report_root }}
+
+      - name: Generate Cucumber HTML report
+        if: ${{ inputs.publish_reports == 'true' && hashFiles(format('{0}/target/cucumber.json', inputs.service)) != '' }}
         run: |
-          cp -r target/site/surefire-report.html github-pages/builds/${{ github.run_number }}/surefire/index.html 2>/dev/null || true
-          cp -r target/surefire-reports/*.xml github-pages/builds/${{ github.run_number }}/surefire/ 2>/dev/null || true
+          mkdir -p "${REPORT_PATH}/cucumber"
+          npm install -g multiple-cucumber-html-reporter
 
-      - name: Copy JaCoCo reports
-        run: cp -r target/site/jacoco/. github-pages/builds/${{ github.run_number }}/jacoco/
-
-      - name: Copy Cucumber reports
-        run: cp -r target/cucumber-reports/. github-pages/builds/${{ github.run_number }}/cucumber/ 2>/dev/null || true
-
-      - name: Create index page with build history
+          npx multiple-cucumber-html-reporter \
+            --jsonDir "${SERVICE}/target" \
+            --reportPath "${REPORT_PATH}/cucumber" \
+            --reportName "strategic-brief-${FROM_BRANCH}" \
+            --pageTitle "strategic-brief-${FROM_BRANCH}" \
+            --metadataName "Branch" \
+            --metadataValue "${FROM_BRANCH}"
+        env:
+          SERVICE: ${{ inputs.service || '.' }}
+          FROM_BRANCH: ${{ inputs.from_branch || github.ref_name || github.event.pull_request.base.ref }}
+          REPORT_PATH: ${{ steps.prepare-reports.outputs.REPORT_PATH }}
+      - name: Copy JUnit reports
+        if: ${{ inputs.publish_reports == 'true' }}
         run: |
-          cat > github-pages/index.html << 'EOF'
-          <!DOCTYPE html>
+          mkdir -p "${REPORT_PATH}/junit"
+          if compgen -G "${SERVICE}/target/surefire-reports/*.xml" > /dev/null; then
+            cp "${SERVICE}"/target/surefire-reports/*.xml "${REPORT_PATH}/junit/"
+          fi
+        env:
+          SERVICE: ${{ inputs.service || '.' }}
+          REPORT_PATH: ${{ steps.prepare-reports.outputs.REPORT_PATH }}
+
+      # - name: Publish JUnit test results to GitHub Checks
+      #   if: ${{ inputs.publish_reports == true }}
+      #   uses: dorny/test-reporter@v1
+      #   with:
+      #     name: JUnit Test Results
+      #     path: ${{ inputs.service }}/target/surefire-reports/*.xml
+      #     reporter: java-junit
+      #     fail-on-error: false
+
+      - name: Copy JaCoCo UT report
+        if: ${{ inputs.publish_reports == 'true' && hashFiles(format('{0}/target/site/jacoco/ut/index.html', inputs.service)) != '' }}
+        run: |
+          if [ -d "${SERVICE}/target/site/jacoco/ut" ]; then
+            mkdir -p "${REPORT_PATH}/jacoco-ut"
+            cp -R "${SERVICE}/target/site/jacoco/ut/." "${REPORT_PATH}/jacoco-ut/"
+          fi
+        env:
+          SERVICE: ${{ inputs.service || '.' }}
+          REPORT_PATH: ${{ steps.prepare-reports.outputs.REPORT_PATH }}
+
+      - name: Copy JaCoCo IT report
+        if: ${{ inputs.publish_reports == 'true' && hashFiles(format('{0}/target/site/jacoco/it/index.html', inputs.service)) != '' }}
+        run: |
+          if [ -d "${SERVICE}/target/site/jacoco/it" ]; then
+            mkdir -p "${REPORT_PATH}/jacoco-it"
+            cp -R "${SERVICE}/target/site/jacoco/it/." "${REPORT_PATH}/jacoco-it/"
+          fi
+        env:
+          SERVICE: ${{ inputs.service || '.' }}
+          REPORT_PATH: ${{ steps.prepare-reports.outputs.REPORT_PATH }}
+
+      - name: Copy JaCoCo merged report
+        if: ${{ inputs.publish_reports == 'true' }}
+        run: |
+          if [ -d "${SERVICE}/target/site/jacoco" ]; then
+            mkdir -p "${REPORT_PATH}/jacoco-merged"
+            cp -R "${SERVICE}/target/site/jacoco/." "${REPORT_PATH}/jacoco-merged/"
+          fi
+        env:
+          SERVICE: ${{ inputs.service || '.' }}
+          REPORT_PATH: ${{ steps.prepare-reports.outputs.REPORT_PATH }}
+
+      - name: Copy latest report
+        if: ${{ inputs.publish_reports == 'true' }}
+        run: |
+          rm -rf "${LATEST_PATH}"
+          mkdir -p "${LATEST_PATH}"
+          cp -R "${REPORT_PATH}/." "${LATEST_PATH}/"
+        env:
+          REPORT_PATH: ${{ steps.prepare-reports.outputs.REPORT_PATH }}
+          LATEST_PATH: ${{ steps.prepare-reports.outputs.LATEST_PATH }}
+
+      - name: Create report index
+        if: ${{ inputs.publish_reports == 'true' }}
+        run: |
+          cat > "${REPORT_PATH}/index.html" <<EOF
+          <!doctype html>
           <html>
           <head>
-              <title>Test Reports</title>
-              <style>
-                  body { font-family: Arial, sans-serif; margin: 20px; }
-                  h1 { color: #333; }
-                  .build-list { list-style-type: none; padding: 0; }
-                  .build-item {
-                      padding: 10px;
-                      margin: 5px 0;
-                      background: #f5f5f5;
-                      border-radius: 5px;
-                      border-left: 4px solid #007bff;
-                  }
-                  .build-item a { text-decoration: none; color: #007bff; font-weight: bold; }
-                  .build-item a:hover { text-decoration: underline; }
-                  .timestamp { color: #666; font-size: 0.9em; }
-              </style>
+            <meta charset="utf-8">
+            <title>Build Reports - ${SERVICE} - ${FROM_BRANCH}</title>
           </head>
           <body>
-              <h1>Maven Test Reports</h1>
-              <p>Build history and test results from recent builds</p>
-              <ul class="build-list">
-                  <li class="build-item">
-                      <a href="builds/${{ github.run_number }}/surefire/">JUnit/Surefire Tests</a>
-                      <br><span class="timestamp">Build #${{ github.run_number }} - Commit: ${{ github.sha }}</span>
-                  </li>
-                  <li class="build-item">
-                      <a href="builds/${{ github.run_number }}/jacoco/">JaCoCo Coverage Report</a>
-                  </li>
-                  <li class="build-item">
-                      <a href="builds/${{ github.run_number }}/cucumber/">Cucumber Test Report</a>
-                  </li>
-              </ul>
+            <h1>Build Reports</h1>
+            <p><strong>Service:</strong> ${SERVICE}</p>
+            <p><strong>Branch:</strong> ${FROM_BRANCH}</p>
+            <p><strong>Run:</strong> ${GITHUB_RUN_NUMBER}</p>
+
+            <h2>Reports</h2>
+            <ul>
+              <li><a href="./cucumber/index.html">Cucumber Report</a></li>
+              <li><a href="./junit/">JUnit XML Reports</a></li>
+              <li><a href="./jacoco-ut/index.html">JaCoCo Unit Test Coverage Report</a></li>
+              <li><a href="./jacoco-it/index.html">JaCoCo IT Coverage Report</a></li>
+              <li><a href="./jacoco-merged/index.html">JaCoCo Merged Coverage Report</a></li>
+            </ul>
           </body>
           </html>
           EOF
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
+          cp "${REPORT_PATH}/index.html" "${LATEST_PATH}/index.html"
+        env:
+          SERVICE: ${{ inputs.service || '.' }}
+          FROM_BRANCH: ${{ inputs.from_branch || github.ref_name || github.event.pull_request.base.ref }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          REPORT_PATH: ${{ steps.prepare-reports.outputs.REPORT_PATH }}
+          LATEST_PATH: ${{ steps.prepare-reports.outputs.LATEST_PATH }}
 
-      - name: Upload to GitHub Pages
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: './github-pages'
+      # - name: Add report summary
+      #   if: ${{ inputs.publish_reports == true }}
+      #   run: |
+      #     PAGES_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/reports/${SAFE_BRANCH}/${GITHUB_RUN_NUMBER}/"
+      #     LATEST_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/reports/${SAFE_BRANCH}/latest/"
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+      #     {
+      #       echo "## Published Reports"
+      #       echo ""
+      #       echo "| Report | Link |"
+      #       echo "|---|---|"
+      #       echo "| Current run | ${PAGES_URL} |"
+      #       echo "| Latest for branch | ${LATEST_URL} |"
+      #       echo "| Cucumber | ${PAGES_URL}cucumber/ |"
+      #       echo "| JUnit XML | ${PAGES_URL}junit/ |"
+      #       echo "| JaCoCo UT | ${PAGES_URL}jacoco-ut/ |"
+      #       echo "| JaCoCo IT | ${PAGES_URL}jacoco-it/ |"
+      #       echo "| JaCoCo merged | ${PAGES_URL}jacoco-merged/ |"
+      #     } >> "$GITHUB_STEP_SUMMARY"
+      - name: Set Git Identity
+        if: inputs.publish_reports == 'true' && github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Publish reports to gh-pages branch
+        if: inputs.publish_reports == 'true' && github.event_name != 'pull_request'
+        run: |
+          TEMP_DIR=$(mktemp -d)
+          git fetch origin gh-pages || true
+
+          if git show-ref --verify --quiet refs/remotes/origin/gh-pages; then
+            git worktree add "${TEMP_DIR}" origin/gh-pages
+          else
+            git worktree add --detach "${TEMP_DIR}"
+            cd "${TEMP_DIR}"
+            git checkout --orphan gh-pages
+            git rm -rf . || true
+            cd -
+          fi
+
+          rm -rf "${TEMP_DIR}/reports/${SAFE_BRANCH}/${GITHUB_RUN_NUMBER}"
+          rm -rf "${TEMP_DIR}/reports/${SAFE_BRANCH}/latest"
+
+          mkdir -p "${TEMP_DIR}/reports/${SAFE_BRANCH}/${GITHUB_RUN_NUMBER}"
+          mkdir -p "${TEMP_DIR}/reports/${SAFE_BRANCH}/latest"
+
+          cp -R "${REPORT_PATH}/." "${TEMP_DIR}/reports/${SAFE_BRANCH}/${GITHUB_RUN_NUMBER}/"
+          cp -R "${LATEST_PATH}/." "${TEMP_DIR}/reports/${SAFE_BRANCH}/latest/"
+
+          cd "${TEMP_DIR}"
+
+          cat > index.html <<EOF
+          <!doctype html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Repository Reports</title>
+          </head>
+          <body>
+            <h1>Repository Reports</h1>
+            <p>Reports are published under <code>/reports/&lt;branch&gt;/&lt;run-number&gt;/</code>.</p>
+          </body>
+          </html>
+          EOF
+
+          git add .
+          git commit -m "Publish reports for ${SERVICE} ${FROM_BRANCH} run ${GITHUB_RUN_NUMBER}" || exit 0
+          echo "ls temp dir: $(ls -l ${TEMP_DIR})"
+          echo "ls root dir: $(ls)"
+          # git push origin HEAD:gh-pages
+        env:
+          SERVICE: ${{ inputs.service || '.' }}
+          FROM_BRANCH: ${{ inputs.from_branch || github.ref_name || github.event.pull_request.base.ref }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          SAFE_BRANCH: ${{ steps.prepare-reports.outputs.SAFE_BRANCH }}
+          REPORT_PATH: ${{ steps.prepare-reports.outputs.REPORT_PATH }}
+          LATEST_PATH: ${{ steps.prepare-reports.outputs.LATEST_PATH }}
